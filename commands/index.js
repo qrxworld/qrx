@@ -12,17 +12,19 @@ export default await QRXCommands.create({
     urlBase: './', // The command modules are in the same directory.
     commandList: [
 //        'git',
-        'ls',
-        'cd',
-        'echo',
-        'mkdir',
-        'mv',
-        'move',
-//        'rm',
-        'cp',
-        'copy',
-        'cat',
-        'pwd'
+      'ls',
+      'cd',
+      'echo',
+      'history',
+      'mkdir',
+      'mv',
+      'move',
+      'rm',
+      'cp',
+      'copy',
+      'cat',
+      'pwd',
+      'touch',
     ]
 });
 
