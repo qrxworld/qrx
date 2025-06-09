@@ -1,12 +1,13 @@
-// These libraries are loaded globally from the CDN scripts in index.html
-const git = window.isomorphicGit;
-const fs = new LightningFS('fs');
-const http = window.isomorphicGit.http.web;
+// qrx.js
+
+// The main libraries are now loaded globally from index.html.
+// We only need to import true ES modules if required.
+import http from 'https://unpkg.com/isomorphic-git/http/web/index.js';
 
 /**
  * QRx is the main class for the web terminal.
- * It acts as a kernel, holding state and connecting modular components,
- * but contains no hardcoded application logic for input or commands.
+ * It acts as a kernel, holding state and loading all external modules
+ * for commands and input handling.
  */
 export default class QRx {
     constructor(options = {}) {
@@ -14,15 +15,13 @@ export default class QRx {
         const defaults = {
             container: document.getElementById('terminal'),
             welcomeMessage: 'Welcome to a fully modular browser-based shell.\r\n',
-            // Paths to the external modules that define core behaviors.
+            // Paths now point to 'index.js' for cleaner imports and standard practice.
             repo: {
-                commands: './commands/list.js',
-                inputHandler: './handlers/input.js'
+                commands: './commands/index.js',
+                inputHandler: './handlers/input.js',
+                keyHandlers: './handlers/keys/index.js' // Corrected path
             },
-            gitConfig: {
-                dir: '/repo',
-                corsProxy: 'https://cors.isomorphic-git.org',
-            }
+            gitConfig: { dir: '/repo', corsProxy: 'https://cors.isomorphic-git.org' }
         };
         // Deep merge of defaults and options
         this.config = { 
@@ -32,51 +31,53 @@ export default class QRx {
             gitConfig: { ...defaults.gitConfig, ...(options.gitConfig || {}) },
         };
 
-        // --- Core Components ---
-        this.fs = fs;
-        this.pfs = fs.promises;
-        this.git = git;
+        // --- Core Components & State ---
+        // Access the libraries from the global window object, as they are loaded
+        // by the <script> tags in index.html before this module runs.
+        this.fs = new window.LightningFS('fs'); 
+        this.pfs = this.fs.promises;
+        this.git = window.isomorphicGit; 
         this.http = http;
-        this.term = new Terminal({
-            cursorBlink: true,
-            fontSize: 14,
-            fontFamily: 'monospace',
+
+        this.term = new window.Terminal({
+            cursorBlink: true, fontSize: 14, fontFamily: 'monospace',
             theme: { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4' },
             allowTransparency: true,
         });
-
-        // --- Shell State ---
-        this.cwd = '/';
-        this.env = {};
-        this.history = [];
-        this.historyIndex = -1;
-        this.commandBuffer = '';
-        this.commandInProgress = false;
         
-        // --- Modular Components ---
-        this.commands = {};
-        this.inputHandler = null;
-
-        // --- Initialization ---
-        this.init();
-    }
-
-    /**
-     * Initializes the terminal and loads all external modules.
-     */
-    async init() {
-        await this.pfs.mkdir(this.cwd).catch(e => {});
+        // Open the terminal early so we can report any errors during init.
         this.term.open(this.config.container);
         this.term.focus();
 
-        // Load all external logic modules (input handlers, commands, etc.)
+        this.cwd = '/'; this.env = {};
+        this.history = []; this.historyIndex = -1;
+        this.commandBuffer = ''; this.commandInProgress = false;
+        
+        // --- Modular Components ---
+        this.commands = {}; this.inputHandler = null;
+
+        // --- Initialization ---
+        this.init().catch(err => {
+            console.error("Initialization failed:", err);
+            this.writeln(`\x1B[1;31mFATAL: Initialization failed. Check console for details.\x1B[0m`);
+            this.commandInProgress = true; // Halt execution
+        });
+    }
+
+    /**
+     * Initializes the filesystem and loads all modules.
+     */
+    async init() {
+        // Create the root directory.
+        await this.pfs.mkdir(this.cwd).catch(e => {});
+
+        // Load all modular components.
         await this.loadModules();
 
-        // The terminal's key events are now delegated to the loaded input handler.
-        // The QRx class itself no longer knows how to handle a keystroke.
+        // Attach the key handler now that modules are loaded.
         this.term.onKey((keyEvent) => {
-            if (this.inputHandler && typeof this.inputHandler.handle === 'function') {
-                this.inputHandler.handle(this, keyEvent); // Pass shell context and the event
+            if (this.inputHandler) {
+                this.inputHandler.handle(this, keyEvent);
             }
         });
 
@@ -85,13 +86,15 @@ export default class QRx {
     }
 
     /**
-     * Loads all necessary modules as defined in the configuration.
+     * Loads all necessary modules (input handlers and commands) as defined in the config.
      */
     async loadModules() {
         this.writeln('Loading modules...');
-        // Load the module responsible for handling user keyboard input.
+        // Instantiate the input dispatcher first.
         await this.loadInputHandler(this.config.repo.inputHandler);
-        // Load the module that defines the list of available commands.
+        // Load all key-specific handlers and register them with the dispatcher.
+        await this.loadKeyHandlers(this.config.repo.keyHandlers);
+        // Load the command manifest.
         await this.loadCommandManifest(this.config.repo.commands);
         this.writeln('All modules loaded.');
     }
@@ -106,10 +109,25 @@ export default class QRx {
         }
     }
 
+    async loadKeyHandlers(url) {
+        if (!this.inputHandler) return;
+        try {
+            const { default: keyManifest } = await import(url);
+            for (const keyName in keyManifest) {
+                const path = keyManifest[keyName];
+                const { default: KeyHandler } = await import(path);
+                this.inputHandler.register(keyName, new KeyHandler());
+            }
+        } catch (error) {
+            this.writeln(`\x1B[1;31mFATAL: Could not load Key Handlers from ${url}\x1B[0m`);
+            console.error(`Failed to load Key Handlers:`, error);
+        }
+    }
+
     async loadCommandManifest(url) {
         try {
-            const commandRegistry = await import(url);
-            this.commands = commandRegistry.default;
+            const { default: commandRegistry } = await import(url);
+            this.commands = commandRegistry;
         } catch (error) {
             this.writeln(`\x1B[1;31mFATAL: Could not load Command Manifest from ${url}\x1B[0m`);
             console.error(`Failed to load Command Manifest:`, error);
@@ -129,7 +147,6 @@ export default class QRx {
     async runCommand(line) {
         this.commandInProgress = true;
         try {
-            // The command runner can eventually be modularized as well.
             line = line.replace(/\$([a-zA-Z_][a-zA-Z0-9_]*)/g, (m, v) => this.env[v] || '');
             const assignMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)/);
             if (assignMatch) {
@@ -179,4 +196,3 @@ export default class QRx {
         return newPath.replace(/\/+/g, '/');
     }
 }
-
