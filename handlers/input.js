@@ -17,6 +17,8 @@ export default class InputHandler {
      * @param {object} handlerInstance - An instance of the handler class for that key.
      */
     register(keyName, handlerInstance) {
+        // DEBUG: Log which handlers are being registered at startup.
+        console.log(`Registering handler for key: '${keyName}'`);
         this.keyHandlers[keyName] = handlerInstance;
     }
 
@@ -30,17 +32,25 @@ export default class InputHandler {
         if (shell.commandInProgress) {
             return;
         }
+        
+        // DEBUG: Log the key press to see what the browser is sending.
+        console.log(`Key event: domEvent.key='${domEvent.key}', key='${key}'`);
 
         const handler = this.keyHandlers[domEvent.key];
         const isPrintable = !domEvent.altKey && !domEvent.ctrlKey && !domEvent.metaKey && domEvent.key.length === 1;
 
         if (handler && typeof handler.run === 'function') {
-            // Found a specific handler for this key (e.g., 'Enter').
+            // DEBUG: Confirm that a specific handler was found and is being run.
+            console.log(`Found and running handler for '${domEvent.key}'`);
             handler.run(shell);
         } else if (isPrintable && this.keyHandlers['Printable']) {
-            // No specific handler, so delegate to the 'Printable' character handler.
+             // DEBUG: Confirm the printable fallback is being used.
+            console.log(`No specific handler found. Using 'Printable' handler for '${key}'`);
             this.keyHandlers['Printable'].run(shell, key);
+        } else {
+            // DEBUG: Log when no handler is found for a key press.
+            console.log(`No handler found or needed for '${domEvent.key}'`);
         }
-        // If no handler is found (e.g., for Ctrl, Alt), nothing happens.
     }
 }
+
