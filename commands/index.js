@@ -14,11 +14,11 @@ export default await QRXCommands.create({
 //        'git',
         'ls',
         'cd',
-//        'echo',
+        'echo',
         'mkdir',
 //        'rm',
 //        'cp',
-//        'cat',
+        'cat',
         'pwd'
     ]
 });
