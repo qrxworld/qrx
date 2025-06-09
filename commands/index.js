@@ -17,7 +17,8 @@ export default await QRXCommands.create({
         'echo',
         'mkdir',
 //        'rm',
-//        'cp',
+        'cp',
+        'copy',
         'cat',
         'pwd'
     ]
