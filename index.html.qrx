@@ -1,0 +1,100 @@
+# index.html
+The goal is to create the bare minimum boilerplate possible to get isomorphic-git working with xterm.js using at least the following command set: `git clone, git pull, git push, git diff, git commit, cd, mkdir, ls, cat, echo, cp`
+
+It should support at least the following:
+- pipes |
+- replace >
+- append >>
+- setting variables
+- "$var" expansion
+
+It should not implement bash faithfully, just enough to get going.
+
+<!doctype html>
+<html>
+  <head>
+    <link href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+    <script src="https://unpkg.com/@isomorphic-git/lightning-fs"></script>
+    <script src="https://unpkg.com/isomorphic-git"></script>
+  </head>
+  <body>
+    <div id="terminal"></div>
+    <script type="module">
+      import http from 'https://unpkg.com/isomorphic-git/http/web/index.js'
+      import QRx from './qrx.js'
+      window.qrxes = []
+      window.qrx = new QRX();
+    </script>
+  </body>
+</html>
+
+===================
+
+## QRx Class
+<script src="./qrx.js">
+export class QRx() {
+  constructor ({
+    repo: {
+      base: 'https://github.com',
+      path: 'qrxworld/qrx.world',
+      commands: 'commands/init.js'
+    },
+    container: document.querySelectorAll('.terminal').last()
+  }) {
+    // Filesystem
+    this.fs = new LightningFS('fs');
+    this.pfs = window.fs.promises;
+
+    // Terminal
+    this.term = new Terminal();
+    this.term.open(this.container);
+    this.write('Hello from \x1B[1;3;31mxterm.js\x1B[0m $ ');
+
+    // Setup
+    this.importCommands();
+
+    // Globals
+    window.qrxes.push(this);
+    window.qrxes.push(new qrx());
+  }
+
+  importCommands(commandListUrl) {
+    this.commands = QRXCommands(this.repo.commands)
+  }
+
+  write(cmdLine) {
+    this.term.write(cmdLine)
+  }
+}
+</script>
+
+===================
+
+## Class: QRXCommand
+<script>
+export Class QRXCommands {
+  constructor({urlBase, commandList}){
+    commandList.forEach(cmd => {
+      commands[cmd] = new QRXCommand(urlBase, cmd)
+    })
+    return commands
+  }
+}
+
+export Class QRXCommand {
+  constructor ({urlBase, cmd}) {}
+  run () {}
+}
+</script>
+
+===================
+
+## Commands
+<script module="./commands/list.js">
+export default new QRXCommands({
+  urlBase: './commands/',
+  commandList: ['git', 'ls', 'cd', 'echo', 'mkdir', 'rm', 'cp']
+})
+</script>
+
