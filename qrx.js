@@ -115,8 +115,11 @@ export default class QRx {
             const { default: keyManifest } = await import(url);
             for (const keyName in keyManifest) {
                 const path = keyManifest[keyName];
-                const { default: KeyHandler } = await import(path);
-                this.inputHandler.register(keyName, new KeyHandler());
+                // Import the module
+                const handlerModule = await import(path);
+                // Register its default export (now an object literal) directly.
+                // This is simpler and avoids potential 'new' keyword issues.
+                this.inputHandler.register(keyName, handlerModule.default);
             }
         } catch (error) {
             this.writeln(`\x1B[1;31mFATAL: Could not load Key Handlers from ${url}\x1B[0m`);
@@ -196,3 +199,4 @@ export default class QRx {
         return newPath.replace(/\/+/g, '/');
     }
 }
+
