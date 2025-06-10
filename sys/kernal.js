@@ -1,27 +1,26 @@
-// qrx.js
+// system/kernel.js
 
 // The main libraries are now loaded globally from index.html.
-// We only need to import true ES modules if required.
 import http from 'https://unpkg.com/isomorphic-git/http/web/index.js';
 
 /**
- * QRx is the main class for the web terminal.
+ * Kernel is the main class for the web terminal.
  * It acts as a kernel, holding state and loading all external modules
  * for commands and input handling.
  */
-export default class QRx {
+export default class Kernel {
     constructor(options = {}) {
         // --- Default Configuration ---
         const defaults = {
             container: document.getElementById('terminal'),
-            welcomeMessage: 'Welcome to a fully modular browser-based shell.\r\n',
-            // Paths now point to 'index.js' for cleaner imports and standard practice.
+            welcomeMessage: 'Welcome to the QRx Kernel.\r\n',
+            // Paths now point to the new '/sys/' directory structure.
             repo: {
-                commands: './commands/index.js',
+                commands: './cmd/index.js',
                 inputHandler: './handlers/input.js',
-                keyHandlers: './handlers/keys/index.js' // Corrected path
+                keyHandlers: './handlers/keys/index.js'
             },
-            gitConfig: { dir: '/repo', corsProxy: 'https://cors.isomorphic-git.org' }
+            gitConfig: { dir: '/', corsProxy: 'https://cors.isomorphic-git.org' }
         };
         // Deep merge of defaults and options
         this.config = { 
@@ -32,9 +31,8 @@ export default class QRx {
         };
 
         // --- Core Components & State ---
-        // Access the libraries from the global window object, as they are loaded
-        // by the <script> tags in index.html before this module runs.
-        this.fs = new window.LightningFS('fs'); 
+        // Access the libraries from the global window object.
+        this.fs = new window.LightningFS('main_qrxworld_qrx'); // Namespaced filesystem
         this.pfs = this.fs.promises;
         this.git = window.isomorphicGit; 
         this.http = http;
@@ -94,7 +92,7 @@ export default class QRx {
         await this.loadInputHandler(this.config.repo.inputHandler);
         // Load all key-specific handlers and register them with the dispatcher.
         await this.loadKeyHandlers(this.config.repo.keyHandlers);
-        // Load the command manifest.
+        // Load the manifest for the built-in, default commands.
         await this.loadCommandManifest(this.config.repo.commands);
         this.writeln('All modules loaded.');
     }
@@ -115,10 +113,7 @@ export default class QRx {
             const { default: keyManifest } = await import(url);
             for (const keyName in keyManifest) {
                 const path = keyManifest[keyName];
-                // Import the module
                 const handlerModule = await import(path);
-                // Register its default export (now an object literal) directly.
-                // This is simpler and avoids potential 'new' keyword issues.
                 this.inputHandler.register(keyName, handlerModule.default);
             }
         } catch (error) {
@@ -155,22 +150,55 @@ export default class QRx {
             if (assignMatch) {
                 this.env[assignMatch[1]] = assignMatch[2].replace(/^"|"$/g, '');
             } else {
-                const parts = this.parseArguments(line);
-                const commandName = parts[0];
-                const args = parts.slice(1);
-                const command = this.commands[commandName];
-
-                if (command && typeof command.run === 'function') {
-                    await command.run(this, args);
-                } else {
-                    this.handleBuiltins(commandName, args);
-                }
+                await this.execute(line);
             }
         } catch (error) {
             this.writeln(`\x1B[1;31mError: ${error.message}\x1B[0m`);
             console.error(error);
         }
         this.prompt();
+    }
+
+    /**
+     * The core command execution logic.
+     * Implements the override system: checks for a user command in the virtual
+     * filesystem before falling back to built-in commands.
+     * @param {string} line - The full command line to execute.
+     */
+    async execute(line) {
+        const parts = this.parseArguments(line);
+        const commandName = parts[0];
+        const args = parts.slice(1);
+
+        if (!commandName) return;
+
+        // 1. Check for a user-defined command in the virtual filesystem first.
+        const userCommandPath = `/sys/cmd/${commandName}.js`;
+        let userCommandModule = null;
+        try {
+            const commandCode = await this.pfs.readFile(userCommandPath, 'utf8');
+            const blob = new Blob([commandCode], { type: 'text/javascript' });
+            const blobUrl = URL.createObjectURL(blob);
+            userCommandModule = await import(blobUrl);
+            URL.revokeObjectURL(blobUrl); // Clean up the URL object.
+        } catch (e) {
+            // This is expected if the file doesn't exist. We just ignore the error.
+        }
+
+        if (userCommandModule && typeof userCommandModule.default.run === 'function') {
+            await userCommandModule.default.run(this, args);
+            return;
+        }
+
+        // 2. If no user command was found, check for a built-in command.
+        const builtinCommand = this.commands[commandName];
+        if (builtinCommand && typeof builtinCommand.run === 'function') {
+            await builtinCommand.run(this, args);
+            return;
+        }
+        
+        // 3. If neither user nor built-in found, handle kernel built-ins or error.
+        this.handleBuiltins(commandName, args);
     }
 
     handleBuiltins(commandName, args) {
