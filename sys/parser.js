@@ -1,73 +1,38 @@
-// sys/parser.js
+// system/parser.js
+
+import grammar from './grammar.js';
 
 /**
- * A simple argument parser that respects single and double quotes.
- * @param {string} line - The command line string.
- * @returns {string[]} - An array of arguments.
- */
-function parseArguments(line) {
-    if (!line) return [];
-    // This regex splits by spaces, but treats anything inside single or double quotes as a single argument.
-    const args = line.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
-    // Remove quotes from the final arguments
-    return args.map(arg => (arg.startsWith('"') && arg.endsWith('"')) || (arg.startsWith("'") && arg.endsWith("'")) ? arg.slice(1, -1) : arg);
-}
-
-/**
- * Parses a single command pipeline (a string that may contain pipes and redirection).
- * @param {string} pipelineStr - The string representing the command pipeline.
- * @returns {object} A structured object representing the pipeline.
- */
-function parsePipeline(pipelineStr) {
-    let commandToExecute = pipelineStr;
-    let redirectPath = null;
-    let redirectMode = null; // 'overwrite' or 'append'
-
-    // Check for '>>' (append) first.
-    const appendIndex = pipelineStr.lastIndexOf('>>');
-    if (appendIndex !== -1) {
-        commandToExecute = pipelineStr.substring(0, appendIndex).trim();
-        redirectPath = pipelineStr.substring(appendIndex + 2).trim();
-        redirectMode = 'append';
-    } else {
-        // If no '>>', check for '>' (overwrite).
-        const overwriteIndex = pipelineStr.lastIndexOf('>');
-        if (overwriteIndex !== -1) {
-            commandToExecute = pipelineStr.substring(0, overwriteIndex).trim();
-            redirectPath = pipelineStr.substring(overwriteIndex + 1).trim();
-            redirectMode = 'overwrite';
-        }
-    }
-
-    // Split the remaining command string into individual commands by the pipe operator.
-    const commands = commandToExecute.split('|').map(cmdStr => {
-        const parts = parseArguments(cmdStr.trim());
-        return {
-            command: parts[0],
-            args: parts.slice(1),
-        };
-    });
-
-    return {
-        commands,
-        redirectPath,
-        redirectMode,
-        original: pipelineStr,
-    };
-}
-
-/**
- * The main export. Parses the entire command line, handling semicolons.
+ * The main export. Parses the entire command line.
  * @param {string} line - The full line input by the user.
- * @returns {object[]} An array of structured pipeline objects to be executed sequentially.
+ * @returns {object[]} An array of structured AST nodes to be executed sequentially.
  */
 export default function parse(line) {
-    // Split the full line into command groups based on the semicolon.
-    const commandGroups = line.split(';').map(group => group.trim());
+    // By creating a new Parser instance for each call, we ensure it's stateless.
+    // This is more robust and prevents errors from previous partial parses.
+    const parser = new nearley.Parser(nearley.Grammar.fromCompiled(grammar));
     
-    // Parse each group into a structured pipeline object.
-    return commandGroups
-        .filter(group => group) // Filter out any empty strings from `cmd1; ; cmd2`
-        .map(parsePipeline);
+    try {
+        // Feed the line to the new parser instance.
+        parser.feed(line);
+        
+        if (parser.results.length > 1) {
+            // This can happen with ambiguous grammars. For now, we'll log a warning
+            // and proceed with the first valid interpretation.
+            console.warn("Ambiguous grammar: multiple parse results. Using the first.");
+        }
+
+        if (parser.results.length) {
+            // The result is the Abstract Syntax Tree (AST).
+            return parser.results[0];
+        } else {
+            // No valid command was parsed.
+            return []; 
+        }
+    } catch (err) {
+        console.error("Parse error:", err.message);
+        // Return a special error object that the kernel can handle and display.
+        return [{ type: 'error', message: err.message }];
+    }
 }
 

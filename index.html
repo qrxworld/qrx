@@ -22,21 +22,17 @@
     <!-- The container for the xterm.js terminal -->
     <div id="terminal"></div>
 
-    <!-- Core library scripts -->
+    <!-- Load core libraries globally -->
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
     <script src="https://unpkg.com/@isomorphic-git/lightning-fs"></script>
     <script src="https://unpkg.com/isomorphic-git"></script>
+    <!-- NEW: Add the nearley.js parser library -->
+    <script src="https://unpkg.com/nearley@2.20.1/lib/nearley.js"></script>
 
     <!-- Main application logic -->
     <script type="module">
-      // Import the main application class from a local file (to be created)
-      import Kernal from './sys/kernal.js'
-      
-      // Initialize a global array to hold terminal instances
-      window.kernals = []
-      
-      // Create a new instance of our application, which will set up the terminal
-      window.kernal = new Kernal();
+      import Kernel from './sys/kernel.js'
+      window.kernel = new Kernel();
     </script>
 </body>
 </html>
