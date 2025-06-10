@@ -68,7 +68,7 @@ export default class Kernel {
      * Initializes the filesystem and loads all modules.
      */
     async init() {
-        await this.pfs.mkdir(this.cwd).catch(e => {});
+        await this.pfs.mkdir('/sys/cmd').catch(e => {}); // Ensure user command dir exists
         await this.loadModules();
         this.term.onKey((keyEvent) => {
             if (this.inputHandler) {
@@ -99,7 +99,7 @@ export default class Kernel {
             console.error(`Failed to load Input Handler:`, error);
         }
     }
-
+    
     async loadKeyHandlers(url) {
         if (!this.inputHandler) return;
         try {
@@ -148,12 +148,10 @@ export default class Kernel {
      */
     async runCommand(line) {
         this.commandInProgress = true;
-        // Use the new parser to get a structured list of command groups.
         const commandGroups = parse(line);
 
         try {
             for (const group of commandGroups) {
-                // Each group is treated as a self-contained pipeline.
                 await this.runPipeline(group);
             }
         } catch (error) {
@@ -174,23 +172,19 @@ export default class Kernel {
 
         try {
             let pipedInput = null;
-
-            // Iterate through each command in the pipeline
             for (const command of pipeline.commands) {
                 const outputBuffer = [];
                 this.write = (data) => outputBuffer.push(data);
                 this.writeln = (data) => outputBuffer.push(data + '\n');
                 
-                // The execute function now takes a parsed command object
                 await this.execute(command, pipedInput);
                 
                 pipedInput = outputBuffer.join('').replace(/\r/g, '');
             }
 
-            // After the pipeline is finished, handle any redirection.
             if (pipeline.redirectMode) {
                 if (!pipeline.redirectPath) {
-                   this.writeln(`-qrx: syntax error near unexpected token 'newline'`);
+                   originalWriteln(`-qrx: syntax error near unexpected token 'newline'`);
                    return;
                 }
                 const absolutePath = this.resolvePath(pipeline.redirectPath);
@@ -201,18 +195,17 @@ export default class Kernel {
                     await this.pfs.writeFile(absolutePath, pipedInput);
                 }
             } else {
-                // If not redirecting, print the final output to the real terminal.
                 originalWrite(pipedInput);
             }
         } finally {
-            // Restore original write methods after this pipeline is complete.
             this.write = originalWrite;
             this.writeln = originalWriteln;
         }
     }
 
     /**
-     * The core command execution logic. It now accepts a parsed command object.
+     * The core command execution logic. It now accepts a parsed command object
+     * and can execute both JS modules and shell scripts.
      * @param {object} commandObject - A parsed command object { command, args }.
      * @param {string|null} stdin - Piped input from a previous command.
      */
@@ -224,35 +217,71 @@ export default class Kernel {
             return;
         }
         
-        // Variable Assignment is a special case. Check if the 'command' part is an assignment.
-        // This is a simple check; it doesn't support `VAR = val`, only `VAR=val`.
         const assignMatch = commandName.match(/^([a-zA-Z_][a-zA-Z0-9_]*)=(.+)/s);
         if (assignMatch && args.length === 0) {
-            // The parser gives us the command as `VAR="value"`, so we match and extract.
-            // assignMatch[1] is the variable name (VAR)
-            // assignMatch[2] is the value ("value")
-            // We strip quotes here, which the parser should have already handled, but this is safer.
             this.env[assignMatch[1]] = assignMatch[2].replace(/^['"]|['"]$/g, '');
             return;
         }
 
-        const userCommandPath = `/sys/cmd/${commandName}.js`;
         let commandModule = null;
-        try {
-            const commandCode = await this.pfs.readFile(userCommandPath, 'utf8');
-            const blob = new Blob([commandCode], { type: 'text/javascript' });
-            const blobUrl = URL.createObjectURL(blob);
-            commandModule = await import(blobUrl);
-            URL.revokeObjectURL(blobUrl);
-        } catch (e) {
-            commandModule = { default: this.commands[commandName] };
-        }
 
+        // 1. Check for user-defined JS command in `/sys/cmd/`.
+        const userJsCommandPath = `/sys/cmd/${commandName.replace(/\.js$/, '')}.js`;
+        try {
+            const commandCode = await this.pfs.readFile(userJsCommandPath, 'utf8');
+            if(commandCode) {
+                const blob = new Blob([commandCode], { type: 'text/javascript' });
+                const blobUrl = URL.createObjectURL(blob);
+                commandModule = await import(blobUrl);
+                URL.revokeObjectURL(blobUrl); 
+            }
+        } catch (e) { /* Fallback */ }
+        
         if (commandModule && typeof commandModule.default?.run === 'function') {
             await commandModule.default.run(this, args, stdin);
-        } else {
-            this.handleBuiltins(commandName, args);
+            return;
         }
+
+        // 2. Try to execute a shell script, checking CWD first, then /sys/cmd
+        let scriptContent = null;
+        try {
+            // First, try to find the script relative to the current working directory.
+            const localScriptPath = this.resolvePath(commandName);
+            scriptContent = await this.pfs.readFile(localScriptPath, 'utf8');
+        } catch (e) {
+            // If not found locally, try the system command path.
+            try {
+                const systemScriptPath = `/sys/cmd/${commandName}`;
+                scriptContent = await this.pfs.readFile(systemScriptPath, 'utf8');
+            } catch (e2) {
+                // If it's not in either location, it's not a script we can run.
+                scriptContent = null;
+            }
+        }
+
+        if (scriptContent !== null) {
+            const scriptLines = scriptContent.split('\n');
+            for (const line of scriptLines) {
+                if (line.trim() && !line.trim().startsWith('#')) {
+                    // Each line of the script is parsed and executed as a new pipeline.
+                    const commandGroups = parse(line);
+                    for (const group of commandGroups) {
+                        await this.runPipeline(group);
+                    }
+                }
+            }
+            return; // Script execution successful, so we are done.
+        }
+
+        // 3. Fallback to built-in JS commands
+        const builtinCommand = this.commands[commandName];
+        if (builtinCommand && typeof builtinCommand.run === 'function') {
+            await builtinCommand.run(this, args, stdin);
+            return;
+        }
+        
+        // 4. Handle kernel built-ins or error out
+        this.handleBuiltins(commandName, args);
     }
 
     handleBuiltins(commandName, args) {
