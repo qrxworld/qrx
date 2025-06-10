@@ -7,9 +7,10 @@
  * key and its corresponding module file here.
  */
 export default {
-    "Enter": "./handlers/keys/enter.js",
-    "Backspace": "./handlers/keys/backspace.js",
-    "ArrowUp": "./handlers/keys/arrowup.js",
-    "ArrowDown": "./handlers/keys/arrowdown.js",
-    "Printable": "./handlers/keys/printable.js"
+  "Enter": "./handlers/keys/enter.js",
+  "Backspace": "./handlers/keys/backspace.js",
+  "ArrowUp": "./handlers/keys/arrowup.js",
+  "ArrowDown": "./handlers/keys/arrowdown.js",
+  "Printable": "./handlers/keys/printable.js",
+  "Control_C": "./handlers/keys/ctrlc.js"
 };

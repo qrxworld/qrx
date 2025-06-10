@@ -55,6 +55,8 @@ export default class Kernel {
         this.commandBuffer = ''; this.commandInProgress = false;
         
         this.commands = {}; this.inputHandler = null;
+        // --- For handling async commands and cancellation ---
+        this.currentProcess = null;
 
         // --- Initialization ---
         this.init().catch(err => {
@@ -139,6 +141,21 @@ export default class Kernel {
     writeln(data) {
         this.write(data + '\r\n');
     }
+    
+    // --- Process Cancellation ---
+    /**
+     * Cancels the currently running foreground process, if any.
+     */
+    cancelCurrentProcess() {
+        if (this.currentProcess && typeof this.currentProcess.cancel === 'function') {
+            this.currentProcess.cancel();
+            this.currentProcess = null;
+        }
+        // Always show a new prompt after Ctrl+C to unblock the terminal.
+        this.writeln('^C');
+        this.prompt();
+    }
+
 
     // --- Command Execution ---
     /**
@@ -177,13 +194,16 @@ export default class Kernel {
                 this.write = (data) => outputBuffer.push(data);
                 this.writeln = (data) => outputBuffer.push(data + '\n');
                 
-                await this.execute(command, pipedInput);
+                // The `execute` function now returns a promise for async commands.
+                this.currentProcess = this.execute(command, pipedInput);
+                await this.currentProcess;
+                this.currentProcess = null;
                 
                 pipedInput = outputBuffer.join('').replace(/\r/g, '');
             }
 
             if (pipeline.redirectMode) {
-                if (!pipeline.redirectPath) {
+                 if (!pipeline.redirectPath) {
                    originalWriteln(`-qrx: syntax error near unexpected token 'newline'`);
                    return;
                 }
@@ -191,7 +211,7 @@ export default class Kernel {
                 if (pipeline.redirectMode === 'append') {
                     let existingContent = await this.pfs.readFile(absolutePath, 'utf8').catch(() => '');
                     await this.pfs.writeFile(absolutePath, existingContent + pipedInput);
-                } else { // 'overwrite'
+                } else {
                     await this.pfs.writeFile(absolutePath, pipedInput);
                 }
             } else {
@@ -225,36 +245,28 @@ export default class Kernel {
 
         let commandModule = null;
 
-        // 1. Check for user-defined JS command in `/sys/cmd/`.
         const userJsCommandPath = `/sys/cmd/${commandName.replace(/\.js$/, '')}.js`;
         try {
             const commandCode = await this.pfs.readFile(userJsCommandPath, 'utf8');
-            if(commandCode) {
-                const blob = new Blob([commandCode], { type: 'text/javascript' });
-                const blobUrl = URL.createObjectURL(blob);
-                commandModule = await import(blobUrl);
-                URL.revokeObjectURL(blobUrl); 
-            }
+            const blob = new Blob([commandCode], { type: 'text/javascript' });
+            const blobUrl = URL.createObjectURL(blob);
+            commandModule = await import(blobUrl);
+            URL.revokeObjectURL(blobUrl);
         } catch (e) { /* Fallback */ }
         
-        if (commandModule && typeof commandModule.default?.run === 'function') {
-            await commandModule.default.run(this, args, stdin);
-            return;
+        if (commandModule?.default?.run) {
+            return commandModule.default.run(this, args, stdin);
         }
 
-        // 2. Try to execute a shell script, checking CWD first, then /sys/cmd
         let scriptContent = null;
         try {
-            // First, try to find the script relative to the current working directory.
             const localScriptPath = this.resolvePath(commandName);
             scriptContent = await this.pfs.readFile(localScriptPath, 'utf8');
         } catch (e) {
-            // If not found locally, try the system command path.
             try {
                 const systemScriptPath = `/sys/cmd/${commandName}`;
                 scriptContent = await this.pfs.readFile(systemScriptPath, 'utf8');
             } catch (e2) {
-                // If it's not in either location, it's not a script we can run.
                 scriptContent = null;
             }
         }
@@ -263,24 +275,22 @@ export default class Kernel {
             const scriptLines = scriptContent.split('\n');
             for (const line of scriptLines) {
                 if (line.trim() && !line.trim().startsWith('#')) {
-                    // Each line of the script is parsed and executed as a new pipeline.
+                    // FIX: Process each line as a new pipeline, not a top-level command
+                    // to avoid the recursive hang.
                     const commandGroups = parse(line);
                     for (const group of commandGroups) {
-                        await this.runPipeline(group);
+                         await this.runPipeline(group);
                     }
                 }
             }
-            return; // Script execution successful, so we are done.
+            return; 
         }
 
-        // 3. Fallback to built-in JS commands
         const builtinCommand = this.commands[commandName];
-        if (builtinCommand && typeof builtinCommand.run === 'function') {
-            await builtinCommand.run(this, args, stdin);
-            return;
+        if (builtinCommand?.run) {
+            return builtinCommand.run(this, args, stdin);
         }
         
-        // 4. Handle kernel built-ins or error out
         this.handleBuiltins(commandName, args);
     }
 
