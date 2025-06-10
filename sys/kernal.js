@@ -14,7 +14,7 @@ export default class Kernel {
         const defaults = {
             container: document.getElementById('terminal'),
             welcomeMessage: 'Welcome to the QRx Kernel.\r\n',
-            // Paths now point to the new '/sys/' directory structure.
+            // Paths are relative to this kernel.js file's location.
             repo: {
                 commands: './cmd/index.js',
                 inputHandler: './handlers/input.js',
@@ -31,19 +31,21 @@ export default class Kernel {
         };
 
         // --- Core Components & State ---
-        // Access the libraries from the global window object.
         this.fs = new window.LightningFS('main_qrxworld_qrx'); // Namespaced filesystem
         this.pfs = this.fs.promises;
         this.git = window.isomorphicGit; 
         this.http = http;
-
         this.term = new window.Terminal({
             cursorBlink: true, fontSize: 14, fontFamily: 'monospace',
             theme: { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4' },
             allowTransparency: true,
         });
+
+        // Bind core I/O methods to ensure 'this' is always correct.
+        // This prevents context-related errors when methods are passed as callbacks.
+        this.write = this.write.bind(this);
+        this.writeln = this.writeln.bind(this);
         
-        // Open the terminal early so we can report any errors during init.
         this.term.open(this.config.container);
         this.term.focus();
 
@@ -51,48 +53,31 @@ export default class Kernel {
         this.history = []; this.historyIndex = -1;
         this.commandBuffer = ''; this.commandInProgress = false;
         
-        // --- Modular Components ---
         this.commands = {}; this.inputHandler = null;
 
-        // --- Initialization ---
         this.init().catch(err => {
             console.error("Initialization failed:", err);
             this.writeln(`\x1B[1;31mFATAL: Initialization failed. Check console for details.\x1B[0m`);
-            this.commandInProgress = true; // Halt execution
+            this.commandInProgress = true;
         });
     }
 
-    /**
-     * Initializes the filesystem and loads all modules.
-     */
     async init() {
-        // Create the root directory.
         await this.pfs.mkdir(this.cwd).catch(e => {});
-
-        // Load all modular components.
         await this.loadModules();
-
-        // Attach the key handler now that modules are loaded.
         this.term.onKey((keyEvent) => {
             if (this.inputHandler) {
                 this.inputHandler.handle(this, keyEvent);
             }
         });
-
         this.term.write(this.config.welcomeMessage);
         this.prompt();
     }
 
-    /**
-     * Loads all necessary modules (input handlers and commands) as defined in the config.
-     */
     async loadModules() {
         this.writeln('Loading modules...');
-        // Instantiate the input dispatcher first.
         await this.loadInputHandler(this.config.repo.inputHandler);
-        // Load all key-specific handlers and register them with the dispatcher.
         await this.loadKeyHandlers(this.config.repo.keyHandlers);
-        // Load the manifest for the built-in, default commands.
         await this.loadCommandManifest(this.config.repo.commands);
         this.writeln('All modules loaded.');
     }
@@ -106,7 +91,7 @@ export default class Kernel {
             console.error(`Failed to load Input Handler:`, error);
         }
     }
-
+    
     async loadKeyHandlers(url) {
         if (!this.inputHandler) return;
         try {
@@ -138,63 +123,84 @@ export default class Kernel {
         this.commandInProgress = false;
         this.term.write(`\r\n\x1B[1;32muser@host\x1B[0m:\x1B[1;34m${this.cwd}\x1B[0m$ `);
     }
-    write(data) { this.term.write(String(data).replace(/\n/g, '\r\n')); }
-    writeln(data) { this.write(data + '\r\n'); }
+
+    write(data) {
+        this.term.write(String(data).replace(/\n/g, '\r\n'));
+    }
+
+    writeln(data) {
+        this.write(data + '\r\n');
+    }
 
     // --- Command Execution ---
-    /**
-     * Top-level function to run a command line. It handles shell features
-     * like redirection before passing the command to the executor.
-     * @param {string} line - The full command line input by the user.
-     */
     async runCommand(line) {
         this.commandInProgress = true;
-        
         const originalWrite = this.write;
         const originalWriteln = this.writeln;
 
         try {
-            // 1. Parse for redirection operator `>`
             let commandToExecute = line;
             let redirectPath = null;
-            
-            // This is a naive parser. It finds the last `>` and assumes everything after is the filename.
-            const redirectIndex = line.lastIndexOf('>');
-            if (redirectIndex !== -1) {
-                commandToExecute = line.substring(0, redirectIndex).trim();
-                redirectPath = line.substring(redirectIndex + 1).trim();
+            let redirectMode = null;
 
-                if (!redirectPath) {
-                    this.writeln(`-qrx: syntax error near unexpected token 'newline'`);
-                    return;
+            // Check for redirection first, as it has precedence for the *entire* pipeline's output.
+            const appendIndex = line.lastIndexOf('>>');
+            if (appendIndex !== -1) {
+                commandToExecute = line.substring(0, appendIndex).trim();
+                redirectPath = line.substring(appendIndex + 2).trim();
+                redirectMode = 'append';
+            } else {
+                const overwriteIndex = line.lastIndexOf('>');
+                if (overwriteIndex !== -1) {
+                    commandToExecute = line.substring(0, overwriteIndex).trim();
+                    redirectPath = line.substring(overwriteIndex + 1).trim();
+                    redirectMode = 'overwrite';
                 }
             }
-
-            // 2. If redirecting, set up a buffer to capture output.
-            let outputBuffer = [];
-            if (redirectPath) {
-                this.write = (data) => outputBuffer.push(data);
-                // `writeln` is overridden to capture the data and a newline,
-                // mimicking how it would appear on the terminal.
-                this.writeln = (data) => outputBuffer.push(data + '\n');
+            
+            if (redirectMode && !redirectPath) {
+                this.writeln(`-qrx: syntax error near unexpected token 'newline'`);
+                return;
             }
 
-            // 3. Execute the command (the part before the '>')
-            await this.execute(commandToExecute);
+            // Now, handle the pipeline for the part of the command that will be executed.
+            const pipeline = commandToExecute.split('|').map(cmd => cmd.trim());
+            let pipedInput = null;
 
-            // 4. If we were redirecting, write the captured buffer to the file.
-            if (redirectPath) {
-                const capturedOutput = outputBuffer.join('').replace(/\r/g, ''); // Normalize newlines
+            for (const command of pipeline) {
+                const outputBuffer = [];
+                // Temporarily hijack terminal output for every command in the pipeline
+                this.write = (data) => outputBuffer.push(data);
+                this.writeln = (data) => outputBuffer.push(data + '\n');
+                
+                // Pass the output of the previous command as stdin to the current one
+                await this.execute(command, pipedInput);
+                
+                // The output of the current command becomes the input for the next one
+                pipedInput = outputBuffer.join('').replace(/\r/g, '');
+            }
+
+            // After the pipeline is finished, handle the final output.
+            if (redirectMode) {
                 const absolutePath = this.resolvePath(redirectPath);
-                await this.pfs.writeFile(absolutePath, capturedOutput);
+                if (redirectMode === 'append') {
+                    let existingContent = await this.pfs.readFile(absolutePath, 'utf8').catch(() => '');
+                    await this.pfs.writeFile(absolutePath, existingContent + pipedInput);
+                } else {
+                    await this.pfs.writeFile(absolutePath, pipedInput);
+                }
+            } else {
+                // If not redirecting, print the final output to the real terminal.
+                originalWrite(pipedInput);
             }
 
         } catch (error) {
-            // If an error happens, write it to the REAL terminal using the original methods.
-            originalWriteln(`\x1B[1;31mError: ${error.message}\x1B[0m`);
+            // Restore original methods before trying to use them.
+            this.write = originalWrite;
+            this.writeln = originalWriteln;
+            this.writeln(`\x1B[1;31mError: ${error.message}\x1B[0m`);
             console.error(error);
         } finally {
-            // 5. ALWAYS restore original methods and show the next prompt.
             this.write = originalWrite;
             this.writeln = originalWriteln;
             this.prompt();
@@ -202,54 +208,47 @@ export default class Kernel {
     }
 
     /**
-     * The core command execution logic. It handles variable expansion,
-     * assignment, and dispatches to the correct command module.
-     * @param {string} line - The command line to execute (without redirection).
+     * The core command execution logic. It now accepts an optional stdin argument.
+     * @param {string} line - The command line to execute.
+     * @param {string|null} stdin - Piped input from a previous command.
      */
-    async execute(line) {
-        // Variable Expansion
+    async execute(line, stdin = null) {
         line = line.replace(/\$([a-zA-Z_][a-zA-Z0-9_]*)/g, (m, v) => this.env[v] || '');
 
-        // Variable Assignment
         const assignMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)/);
         if (assignMatch) {
             this.env[assignMatch[1]] = assignMatch[2].replace(/^"|"$/g, '');
-            return; // Assignment produces no output and ends execution here.
+            return;
         }
 
         const parts = this.parseArguments(line);
         const commandName = parts[0];
         const args = parts.slice(1);
 
-        if (!commandName) return;
+        if (!commandName) {
+            // If there's only stdin, echo it. This handles `echo "foo" |`
+            if (stdin) this.write(stdin);
+            return;
+        }
 
-        // 1. Check for a user-defined command in the virtual filesystem first.
         const userCommandPath = `/sys/cmd/${commandName}.js`;
-        let userCommandModule = null;
+        let commandModule = null;
         try {
             const commandCode = await this.pfs.readFile(userCommandPath, 'utf8');
             const blob = new Blob([commandCode], { type: 'text/javascript' });
             const blobUrl = URL.createObjectURL(blob);
-            userCommandModule = await import(blobUrl);
-            URL.revokeObjectURL(blobUrl); // Clean up the URL object.
+            commandModule = await import(blobUrl);
+            URL.revokeObjectURL(blobUrl);
         } catch (e) {
-            // This is expected if the file doesn't exist. We just ignore the error.
+            // Fallback to built-in if user command doesn't exist.
+            commandModule = { default: this.commands[commandName] };
         }
 
-        if (userCommandModule && typeof userCommandModule.default.run === 'function') {
-            await userCommandModule.default.run(this, args);
-            return;
+        if (commandModule && typeof commandModule.default?.run === 'function') {
+            await commandModule.default.run(this, args, stdin);
+        } else {
+            this.handleBuiltins(commandName, args);
         }
-
-        // 2. If no user command was found, check for a built-in command.
-        const builtinCommand = this.commands[commandName];
-        if (builtinCommand && typeof builtinCommand.run === 'function') {
-            await builtinCommand.run(this, args);
-            return;
-        }
-        
-        // 3. If neither user nor built-in found, handle kernel built-ins or error.
-        this.handleBuiltins(commandName, args);
     }
 
     handleBuiltins(commandName, args) {
@@ -263,14 +262,13 @@ export default class Kernel {
             default: this.writeln(`command not found: ${commandName}`);
         }
     }
-
-    // --- Utility Methods ---
+    
     parseArguments(line) {
         if (!line) return [''];
-        const args = line.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
-        return args.map(arg => arg.startsWith('"') && arg.endsWith('"') ? arg.slice(1, -1) : arg);
+        const args = line.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+        return args.map(arg => (arg.startsWith('"') && arg.endsWith('"')) || (arg.startsWith("'") && arg.endsWith("'")) ? arg.slice(1, -1) : arg);
     }
-
+    
     resolvePath(path) {
         if (!path || path === '.') return this.cwd;
         if (path.startsWith('/')) return path.replace(/\/+/g, '/');

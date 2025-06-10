@@ -1,17 +1,17 @@
-// commands/echo.js
+// sys/cmd/echo.js
 
 /**
  * Implements the 'echo' command.
- * Writes its arguments back to the terminal, separated by spaces.
+ * Writes its arguments back to the terminal. It ignores stdin.
  */
 export default {
     /**
-     * The main entry point for the 'echo' command.
-     * @param {QRx} shell - The shell instance.
+     * @param {Kernel} shell - The shell instance.
      * @param {string[]} args - The command arguments.
+     * @param {string|null} stdin - Piped input (ignored by echo).
      */
-    async run(shell, args) {
-        // Join the arguments with spaces and write the result as a new line.
+    async run(shell, args, stdin) {
+        // The echo command typically ignores standard input.
         shell.writeln(args.join(' '));
     }
 };
