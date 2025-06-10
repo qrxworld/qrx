@@ -2,6 +2,8 @@
 
 // The main libraries are now loaded globally from index.html.
 import http from 'https://unpkg.com/isomorphic-git/http/web/index.js';
+// Import the new parser module.
+import parse from './parser.js';
 
 /**
  * Kernel is the main class for the web terminal.
@@ -42,7 +44,6 @@ export default class Kernel {
         });
 
         // Bind core I/O methods to ensure 'this' is always correct.
-        // This prevents context-related errors when methods are passed as callbacks.
         this.write = this.write.bind(this);
         this.writeln = this.writeln.bind(this);
         
@@ -55,6 +56,7 @@ export default class Kernel {
         
         this.commands = {}; this.inputHandler = null;
 
+        // --- Initialization ---
         this.init().catch(err => {
             console.error("Initialization failed:", err);
             this.writeln(`\x1B[1;31mFATAL: Initialization failed. Check console for details.\x1B[0m`);
@@ -62,6 +64,9 @@ export default class Kernel {
         });
     }
 
+    /**
+     * Initializes the filesystem and loads all modules.
+     */
     async init() {
         await this.pfs.mkdir(this.cwd).catch(e => {});
         await this.loadModules();
@@ -74,6 +79,9 @@ export default class Kernel {
         this.prompt();
     }
 
+    /**
+     * Loads all necessary modules (input handlers and commands) as defined in the config.
+     */
     async loadModules() {
         this.writeln('Loading modules...');
         await this.loadInputHandler(this.config.repo.inputHandler);
@@ -91,7 +99,7 @@ export default class Kernel {
             console.error(`Failed to load Input Handler:`, error);
         }
     }
-    
+
     async loadKeyHandlers(url) {
         if (!this.inputHandler) return;
         try {
@@ -133,101 +141,98 @@ export default class Kernel {
     }
 
     // --- Command Execution ---
+    /**
+     * Top-level function to run a full command line. It uses the parser to break
+     * the line into executable groups and runs them sequentially.
+     * @param {string} line - The full command line input by the user.
+     */
     async runCommand(line) {
         this.commandInProgress = true;
+        // Use the new parser to get a structured list of command groups.
+        const commandGroups = parse(line);
+
+        try {
+            for (const group of commandGroups) {
+                // Each group is treated as a self-contained pipeline.
+                await this.runPipeline(group);
+            }
+        } catch (error) {
+            this.writeln(`\x1B[1;31mError: ${error.message}\x1B[0m`);
+            console.error(error);
+        } finally {
+            this.prompt();
+        }
+    }
+
+    /**
+     * Executes a single, parsed pipeline object.
+     * @param {object} pipeline - The parsed pipeline object from parser.js.
+     */
+    async runPipeline(pipeline) {
         const originalWrite = this.write;
         const originalWriteln = this.writeln;
 
         try {
-            let commandToExecute = line;
-            let redirectPath = null;
-            let redirectMode = null;
-
-            // Check for redirection first, as it has precedence for the *entire* pipeline's output.
-            const appendIndex = line.lastIndexOf('>>');
-            if (appendIndex !== -1) {
-                commandToExecute = line.substring(0, appendIndex).trim();
-                redirectPath = line.substring(appendIndex + 2).trim();
-                redirectMode = 'append';
-            } else {
-                const overwriteIndex = line.lastIndexOf('>');
-                if (overwriteIndex !== -1) {
-                    commandToExecute = line.substring(0, overwriteIndex).trim();
-                    redirectPath = line.substring(overwriteIndex + 1).trim();
-                    redirectMode = 'overwrite';
-                }
-            }
-            
-            if (redirectMode && !redirectPath) {
-                this.writeln(`-qrx: syntax error near unexpected token 'newline'`);
-                return;
-            }
-
-            // Now, handle the pipeline for the part of the command that will be executed.
-            const pipeline = commandToExecute.split('|').map(cmd => cmd.trim());
             let pipedInput = null;
 
-            for (const command of pipeline) {
+            // Iterate through each command in the pipeline
+            for (const command of pipeline.commands) {
                 const outputBuffer = [];
-                // Temporarily hijack terminal output for every command in the pipeline
                 this.write = (data) => outputBuffer.push(data);
                 this.writeln = (data) => outputBuffer.push(data + '\n');
                 
-                // Pass the output of the previous command as stdin to the current one
+                // The execute function now takes a parsed command object
                 await this.execute(command, pipedInput);
                 
-                // The output of the current command becomes the input for the next one
                 pipedInput = outputBuffer.join('').replace(/\r/g, '');
             }
 
-            // After the pipeline is finished, handle the final output.
-            if (redirectMode) {
-                const absolutePath = this.resolvePath(redirectPath);
-                if (redirectMode === 'append') {
+            // After the pipeline is finished, handle any redirection.
+            if (pipeline.redirectMode) {
+                if (!pipeline.redirectPath) {
+                   this.writeln(`-qrx: syntax error near unexpected token 'newline'`);
+                   return;
+                }
+                const absolutePath = this.resolvePath(pipeline.redirectPath);
+                if (pipeline.redirectMode === 'append') {
                     let existingContent = await this.pfs.readFile(absolutePath, 'utf8').catch(() => '');
                     await this.pfs.writeFile(absolutePath, existingContent + pipedInput);
-                } else {
+                } else { // 'overwrite'
                     await this.pfs.writeFile(absolutePath, pipedInput);
                 }
             } else {
                 // If not redirecting, print the final output to the real terminal.
                 originalWrite(pipedInput);
             }
-
-        } catch (error) {
-            // Restore original methods before trying to use them.
-            this.write = originalWrite;
-            this.writeln = originalWriteln;
-            this.writeln(`\x1B[1;31mError: ${error.message}\x1B[0m`);
-            console.error(error);
         } finally {
+            // Restore original write methods after this pipeline is complete.
             this.write = originalWrite;
             this.writeln = originalWriteln;
-            this.prompt();
         }
     }
 
     /**
-     * The core command execution logic. It now accepts an optional stdin argument.
-     * @param {string} line - The command line to execute.
+     * The core command execution logic. It now accepts a parsed command object.
+     * @param {object} commandObject - A parsed command object { command, args }.
      * @param {string|null} stdin - Piped input from a previous command.
      */
-    async execute(line, stdin = null) {
-        line = line.replace(/\$([a-zA-Z_][a-zA-Z0-9_]*)/g, (m, v) => this.env[v] || '');
-
-        const assignMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)/);
-        if (assignMatch) {
-            this.env[assignMatch[1]] = assignMatch[2].replace(/^"|"$/g, '');
-            return;
-        }
-
-        const parts = this.parseArguments(line);
-        const commandName = parts[0];
-        const args = parts.slice(1);
+    async execute({ command, args }, stdin = null) {
+        const commandName = command;
 
         if (!commandName) {
-            // If there's only stdin, echo it. This handles `echo "foo" |`
-            if (stdin) this.write(stdin);
+            if (stdin !== null) this.write(stdin);
+            return;
+        }
+        
+        // Variable Assignment is a special case. Check if the 'command' part is an assignment.
+        // This is a simple check; it doesn't support `VAR = val`, only `VAR=val`.
+        const assignMatch = commandName.match(/^([a-zA-Z_][a-zA-Z0-9_]*)=(.+)/s);
+        if (assignMatch && args.length === 0) {
+            // The parser gives us the command as `VAR="value"`, so we match and extract.
+            // assignMatch[1] is the variable name (VAR)
+            // assignMatch[2] is the value ("value")
+            // We strip quotes here, which the parser should have already handled, but this is safer.
+            this.env[assignMatch[1]] = assignMatch[2].replace(/^['"]|['"]$/g, '');
             return;
         }
 
@@ -240,7 +245,6 @@ export default class Kernel {
             commandModule = await import(blobUrl);
             URL.revokeObjectURL(blobUrl);
         } catch (e) {
-            // Fallback to built-in if user command doesn't exist.
             commandModule = { default: this.commands[commandName] };
         }
 
@@ -261,12 +265,6 @@ export default class Kernel {
             case '': break;
             default: this.writeln(`command not found: ${commandName}`);
         }
-    }
-    
-    parseArguments(line) {
-        if (!line) return [''];
-        const args = line.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
-        return args.map(arg => (arg.startsWith('"') && arg.endsWith('"')) || (arg.startsWith("'") && arg.endsWith("'")) ? arg.slice(1, -1) : arg);
     }
     
     resolvePath(path) {
