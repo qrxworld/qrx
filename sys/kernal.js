@@ -142,30 +142,81 @@ export default class Kernel {
     writeln(data) { this.write(data + '\r\n'); }
 
     // --- Command Execution ---
+    /**
+     * Top-level function to run a command line. It handles shell features
+     * like redirection before passing the command to the executor.
+     * @param {string} line - The full command line input by the user.
+     */
     async runCommand(line) {
         this.commandInProgress = true;
+        
+        const originalWrite = this.write;
+        const originalWriteln = this.writeln;
+
         try {
-            line = line.replace(/\$([a-zA-Z_][a-zA-Z0-9_]*)/g, (m, v) => this.env[v] || '');
-            const assignMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)/);
-            if (assignMatch) {
-                this.env[assignMatch[1]] = assignMatch[2].replace(/^"|"$/g, '');
-            } else {
-                await this.execute(line);
+            // 1. Parse for redirection operator `>`
+            let commandToExecute = line;
+            let redirectPath = null;
+            
+            // This is a naive parser. It finds the last `>` and assumes everything after is the filename.
+            const redirectIndex = line.lastIndexOf('>');
+            if (redirectIndex !== -1) {
+                commandToExecute = line.substring(0, redirectIndex).trim();
+                redirectPath = line.substring(redirectIndex + 1).trim();
+
+                if (!redirectPath) {
+                    this.writeln(`-qrx: syntax error near unexpected token 'newline'`);
+                    return;
+                }
             }
+
+            // 2. If redirecting, set up a buffer to capture output.
+            let outputBuffer = [];
+            if (redirectPath) {
+                this.write = (data) => outputBuffer.push(data);
+                // `writeln` is overridden to capture the data and a newline,
+                // mimicking how it would appear on the terminal.
+                this.writeln = (data) => outputBuffer.push(data + '\n');
+            }
+
+            // 3. Execute the command (the part before the '>')
+            await this.execute(commandToExecute);
+
+            // 4. If we were redirecting, write the captured buffer to the file.
+            if (redirectPath) {
+                const capturedOutput = outputBuffer.join('').replace(/\r/g, ''); // Normalize newlines
+                const absolutePath = this.resolvePath(redirectPath);
+                await this.pfs.writeFile(absolutePath, capturedOutput);
+            }
+
         } catch (error) {
-            this.writeln(`\x1B[1;31mError: ${error.message}\x1B[0m`);
+            // If an error happens, write it to the REAL terminal using the original methods.
+            originalWriteln(`\x1B[1;31mError: ${error.message}\x1B[0m`);
             console.error(error);
+        } finally {
+            // 5. ALWAYS restore original methods and show the next prompt.
+            this.write = originalWrite;
+            this.writeln = originalWriteln;
+            this.prompt();
         }
-        this.prompt();
     }
 
     /**
-     * The core command execution logic.
-     * Implements the override system: checks for a user command in the virtual
-     * filesystem before falling back to built-in commands.
-     * @param {string} line - The full command line to execute.
+     * The core command execution logic. It handles variable expansion,
+     * assignment, and dispatches to the correct command module.
+     * @param {string} line - The command line to execute (without redirection).
      */
     async execute(line) {
+        // Variable Expansion
+        line = line.replace(/\$([a-zA-Z_][a-zA-Z0-9_]*)/g, (m, v) => this.env[v] || '');
+
+        // Variable Assignment
+        const assignMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)/);
+        if (assignMatch) {
+            this.env[assignMatch[1]] = assignMatch[2].replace(/^"|"$/g, '');
+            return; // Assignment produces no output and ends execution here.
+        }
+
         const parts = this.parseArguments(line);
         const commandName = parts[0];
         const args = parts.slice(1);
