@@ -1,42 +1,41 @@
-// commands/touch.js
-
+// -----------------------------------------------------------------------------
+// file: sys/cmd/touch.js
+// -----------------------------------------------------------------------------
 /**
  * Implements the 'touch' command.
- * Creates an empty file if it doesn't exist, or updates the
- * modification timestamp of an existing file.
+ * MODIFIED to return an exit status.
  */
 export default {
     /**
-     * The main entry point for the 'touch' command.
-     * @param {QRx} shell - The shell instance.
+     * @param {Kernel} shell - The shell instance.
      * @param {string[]} args - The command arguments (file paths).
+     * @returns {Promise<number>} The exit status. 0 for success, 1 for failure.
      */
     async run(shell, args) {
         if (args.length === 0) {
             shell.writeln('touch: missing file operand');
-            return;
+            return 1;
         }
 
         const now = new Date();
+        let hadError = false;
 
         for (const path of args) {
             const absolutePath = shell.resolvePath(path);
             
             try {
-                // Check if the file already exists.
                 const stats = await shell.pfs.stat(absolutePath).catch(() => null);
 
                 if (stats) {
-                    // If file exists, update its access and modification times.
                     await shell.pfs.utimes(absolutePath, now, now);
                 } else {
-                    // If file does not exist, create it as an empty file.
                     await shell.pfs.writeFile(absolutePath, '');
                 }
             } catch (e) {
                 shell.writeln(`touch: cannot touch '${path}': ${e.message}`);
+                hadError = true;
             }
         }
+        return hadError ? 1 : 0;
     }
 };
-

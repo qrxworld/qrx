@@ -1,14 +1,17 @@
-// commands/history.js
-
+// -----------------------------------------------------------------------------
+// file: sys/cmd/history.js
+// -----------------------------------------------------------------------------
 /**
  * Implements the 'history' command.
  * Displays the command history or clears it.
+ * MODIFIED to return an exit status.
  */
 export default {
     /**
      * The main entry point for the 'history' command.
-     * @param {QRx} shell - The shell instance.
+     * @param {Kernel} shell - The shell instance.
      * @param {string[]} args - The command arguments.
+     * @returns {Promise<number>} The exit status. This command always returns 0 for success.
      */
     async run(shell, args) {
         // Check for the '-c' (clear) flag.
@@ -16,13 +19,13 @@ export default {
             shell.history = [];
             shell.historyIndex = -1;
             shell.writeln('Command history cleared.');
-            return;
+            return 0; // Success
         }
 
         // If no flags are present, display the history.
         if (shell.history.length === 0) {
             shell.writeln('No history yet.');
-            return;
+            return 0; // Success
         }
 
         // Iterate over the history array and print each command with its line number.
@@ -31,6 +34,9 @@ export default {
             const lineNumber = String(index + 1).padStart(4, ' ');
             shell.writeln(`${lineNumber}  ${command}`);
         });
+
+        // The history command itself doesn't have a failure condition in this implementation.
+        return 0; // Success
     }
 };
 

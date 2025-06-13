@@ -1,9 +1,9 @@
-// sys/cmd/ed.js
-
+// -----------------------------------------------------------------------------
+// file: sys/cmd/ed.js
+// -----------------------------------------------------------------------------
 /**
  * Implements 'ed', a simple fullscreen text editor.
- * This command demonstrates how to create long-running, interactive,
- * asynchronous commands within the QRx Kernel.
+ * MODIFIED to return an exit status via its promise resolution.
  */
 export default {
     /**
@@ -11,15 +11,15 @@ export default {
      * @param {Kernel} shell - The shell instance.
      * @param {string[]} args - The command arguments, expects one: [filename].
      * @param {string|null} stdin - Piped input (ignored by ed).
-     * @returns {Promise} A promise that resolves when the editor is closed.
+     * @returns {Promise<number>} A promise that resolves with the exit status (0 for success, 1 for failure).
      */
     run(shell, args, stdin) {
-        // This command returns a Promise. The Kernel will wait for this promise
-        // to resolve before showing the next prompt.
+        // This command returns a Promise. The Kernel will await this promise
+        // and use its resolved value as the exit status.
         return new Promise(async (resolve, reject) => {
             if (args.length !== 1) {
                 shell.writeln('Usage: ed <filename>');
-                resolve(); // Immediately resolve to show next prompt.
+                resolve(1); // Resolve with failure status
                 return;
             }
             
@@ -136,21 +136,22 @@ export default {
             };
             
             // --- Event Handlers ---
-            const cleanup = () => {
+            const cleanup = (status) => {
                 document.body.removeChild(editorContainer);
                 document.removeEventListener('keydown', handleKeyDown);
                 shell.currentProcess = null; // Clear the current process
-                resolve(); // This signals to the Kernel that the command is done.
+                resolve(status); // This signals to the Kernel that the command is done.
             };
 
             const saveFile = async () => {
                 const newContent = editorTextarea.value;
                 try {
                     await shell.pfs.writeFile(filePath, newContent, 'utf8');
-                    cleanup();
+                    cleanup(0); // Success
                 } catch (e) {
                     console.error('Failed to save file:', e);
                     await showModal(`Error saving file: ${e.message}`);
+                    cleanup(1); // Failure
                 }
             };
 
@@ -158,10 +159,10 @@ export default {
                 if(hasChanges) {
                     const userIsSure = await showModal("You have unsaved changes. Discard them?", true);
                     if (userIsSure) {
-                        cleanup();
+                        cleanup(0); // User chose to exit, considered a success.
                     }
                 } else {
-                    cleanup();
+                    cleanup(0); // Exited without changes, success.
                 }
             };
             
@@ -171,7 +172,7 @@ export default {
             
             const handleKeyDown = (e) => {
                 if (e.ctrlKey) {
-                    if (e.key.toLowerCase() === 's') { e.preventDefault(); saveFile(); } 
+                    if (e.key.toLowerCase() === 's') { e.preventDefault(); saveFile(); }  
                     else if (e.key.toLowerCase() === 'c') { e.preventDefault(); cancelEdit(); }
                 }
             };

@@ -21,7 +21,6 @@ export default await QRXCommands.create({
       'move',
       'rm',
       'cp',
-      'copy',
       'cat',
       'pwd',
       'touch',
