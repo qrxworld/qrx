@@ -66,9 +66,6 @@ export default class Kernel {
         this.prompt();
     }
 
-    /**
-     * Loads all necessary modules using absolute paths defined in the config.
-     */
     async loadModules() {
         this.writeln('Loading modules...');
         await this.loadInputHandler();
@@ -156,18 +153,58 @@ export default class Kernel {
         }
     }
 
+    /**
+     * Main AST interpreter, now with logical operator support.
+     */
     async executeNode(node, stdin = null) {
         if (!node) return { stdout: '', status: 0 };
         let result = { stdout: '', status: 0 };
+
         switch (node.type) {
             case 'error':
                 result = { stdout: `-qrx: parse error: ${node.message}\n`, status: 2 };
                 break;
-            case 'pipeline':
+            
+            // NEW: Handle logical AND
+            case 'logical_and': {
+                const leftResult = await this.executeNode(node.left, stdin);
+                // Only execute the right side if the left side succeeded (status 0).
+                if (leftResult.status === 0) {
+                    const rightResult = await this.executeNode(node.right, stdin);
+                    result = {
+                        stdout: leftResult.stdout + rightResult.stdout,
+                        status: rightResult.status
+                    };
+                } else {
+                    result = leftResult; // If left fails, the whole chain fails.
+                }
+                break;
+            }
+
+            // NEW: Handle logical OR
+            case 'logical_or': {
+                const leftResult = await this.executeNode(node.left, stdin);
+                // Only execute the right side if the left side failed (status != 0).
+                if (leftResult.status !== 0) {
+                    const rightResult = await this.executeNode(node.right, stdin);
+                     result = {
+                        stdout: leftResult.stdout + rightResult.stdout,
+                        status: rightResult.status
+                    };
+                } else {
+                    result = leftResult; // If left succeeds, the whole chain succeeds.
+                }
+                break;
+            }
+
+            case 'pipeline': {
                 const leftResult = await this.executeNode(node.from, stdin);
+                // The status of a pipeline is the status of the rightmost command.
                 result = await this.executeNode(node.to, leftResult.stdout);
                 break;
-            case 'group':
+            }
+
+            case 'group': {
                 const groupOutputBuffer = [];
                 let groupStatus = 0;
                 for (const cmdNode of node.commands) {
@@ -177,7 +214,9 @@ export default class Kernel {
                 }
                 result = { stdout: groupOutputBuffer.join(''), status: groupStatus };
                 break;
-            case 'command':
+            }
+
+            case 'command': {
                 const buffer = [];
                 const originalWrite = this.write;
                 const originalWriteln = this.writeln;
@@ -192,7 +231,9 @@ export default class Kernel {
                 }
                 result = { stdout: buffer.join(''), status: commandStatus };
                 break;
+            }
         }
+
         if (node.redirection) {
             const { mode, file } = node.redirection;
             const path = this.resolvePath(file);
@@ -209,6 +250,7 @@ export default class Kernel {
                 result.status = 1;
             }
         }
+
         this.lastExitStatus = result.status;
         return result;
     }
@@ -264,34 +306,20 @@ export default class Kernel {
         }
     }
 
-    /**
-     * Resolves a relative or absolute path to a fully qualified absolute path.
-     * This version correctly handles '.' and '..' segments.
-     * @param {string} path - The path to resolve.
-     * @returns {string} The resolved absolute path.
-     */
     resolvePath(path) {
         if (!path) return this.cwd;
-
-        // Determine the starting point for resolution.
         const fullPath = path.startsWith('/') ? path : `${this.cwd}/${path}`;
-        
         const parts = fullPath.split('/');
         const resolvedParts = [];
-
         for (const part of parts) {
             if (part === '..') {
-                // Go up one level, but not beyond the root.
                 if (resolvedParts.length > 0) {
                     resolvedParts.pop();
                 }
             } else if (part !== '.' && part !== '') {
-                // Ignore '.' and empty parts (from multiple slashes), add all others.
                 resolvedParts.push(part);
             }
         }
-        
-        // Join the parts and ensure the path starts with a '/'.
         const finalPath = `/${resolvedParts.join('/')}`;
         return finalPath;
     }
