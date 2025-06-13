@@ -14,20 +14,18 @@ export default {
         const targetPath = shell.resolvePath(args[0] || '/');
         
         try {
-            // Get stats to ensure the target exists and is a directory.
             const stats = await shell.pfs.stat(targetPath);
             
             if (stats.isDirectory()) {
-                // If it's a directory, update the shell's state and return success.
                 shell.cwd = targetPath;
-                return 0; // 0 indicates success
+                return 0; // Success
             } else {
                 shell.writeln(`-qrx: cd: not a directory: ${args[0] || targetPath}`);
-                return 1; // 1 indicates failure
+                return 1; // Failure
             }
         } catch (e) {
             shell.writeln(`-qrx: cd: no such file or directory: ${args[0] || targetPath}`);
-            return 1; // 1 indicates failure
+            return 1; // Failure
         }
     }
 };

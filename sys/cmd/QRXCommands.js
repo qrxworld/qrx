@@ -1,20 +1,14 @@
+// -----------------------------------------------------------------------------
+// file: sys/cmd/QRXCommands.js
+// -----------------------------------------------------------------------------
 /**
  * Represents a single, dynamically loadable command.
- * It is a placeholder in this implementation, as the actual logic
- * will reside in the individual command modules (e.g., ls.js, git.js).
- * The core requirement is that each command module has a 'run' method.
  */
 export class QRXCommand {
     constructor({ urlBase, cmd }) {
-        // In a more complex scenario, this constructor could pre-fetch
-        // command-specific metadata or dependencies. For now, it's a stub.
         this.name = cmd;
         this.path = `${urlBase}${cmd}.js`;
     }
-
-    // The 'run' method is the key. The actual implementation will be
-    // in the module file itself, not in this class.
-    // async run(shell, args) { /* Logic is in the module */ }
 }
 
 /**
@@ -33,9 +27,9 @@ export class QRXCommands {
         const commands = {};
         for (const cmd of commandList) {
             try {
-                // Dynamically import the module for each command.
-                const commandModule = await import(`${urlBase}${cmd}.js`);
-                // Store the entire module (which should have a default export with a 'run' method).
+                // MODIFIED: Added a cache-busting query parameter.
+                // This ensures the browser always fetches the latest version of the command file.
+                const commandModule = await import(`${urlBase}${cmd}.js?t=${new Date().getTime()}`);
                 commands[cmd] = commandModule.default;
             } catch (error) {
                 // Log an error but don't stop the shell from loading other commands.
