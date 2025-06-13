@@ -25,6 +25,7 @@ export default await QRXCommands.create({
       'pwd',
       'touch',
       'ed',
+      'js',
     ]
 });
 
