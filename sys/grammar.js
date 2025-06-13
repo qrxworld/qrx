@@ -4,19 +4,33 @@
  * This file defines the grammar for the QRx shell language using nearley.js syntax.
  * It specifies how to parse command sequences, pipelines, groups, and arguments.
  * The output of this grammar is an Abstract Syntax Tree (AST).
+ * FINAL FIX 5: Reverted to a stable grammar structure and correctly added background operator support.
  */
 export default {
     Lexer: undefined,
     ParserRules: [
     {"name": "main", "symbols": ["_", "command_list", "_"], "postprocess": (d) => d[1]},
 
-    // A command_list is one or more logical_sequences, separated by semicolons.
-    // This is the lowest precedence operator.
+    // A command_list is one or more logical_sequences, separated by '&' or ';'.
     {"name": "command_list", "symbols": ["logical_sequence"], "postprocess": (d) => [d[0]]},
     {"name": "command_list", "symbols": ["command_list", "_", {"literal":";"}, "_", "logical_sequence"], "postprocess": (d) => [...d[0], d[4]]},
+    {"name": "command_list", "symbols": ["command_list", "_", {"literal":"&"}, "_", "logical_sequence"], "postprocess": 
+        (d) => {
+            const last = d[0].pop();
+            return [...d[0], { ...last, background: true }, d[4]];
+        }
+    },
+    // Allows a final '&' or ';' at the end of the line.
+    {"name": "command_list", "symbols": ["command_list", "_", {"literal":"&"}], "postprocess":
+        (d) => {
+            const last = d[0].pop();
+            return [...d[0], { ...last, background: true }];
+        }
+    },
+    {"name": "command_list", "symbols": ["command_list", "_", {"literal":";"}], "postprocess": (d) => d[0]},
 
-    // NEW: A logical_sequence handles '&&' and '||'.
-    // These have a higher precedence than ';'.
+
+    // A logical_sequence handles '&&' and '||'.
     {"name": "logical_sequence", "symbols": ["pipeline"], "postprocess": (d) => d[0]},
     {"name": "logical_sequence", "symbols": ["logical_sequence", "__", {"literal":"&"}, {"literal":"&"}, "__", "pipeline"], "postprocess": 
         (d) => ({type: 'logical_and', left: d[0], right: d[5]})
@@ -25,7 +39,7 @@ export default {
         (d) => ({type: 'logical_or', left: d[0], right: d[5]})
     },
 
-    // A pipeline handles '|'. This has a higher precedence than '&&' and '||'.
+    // A pipeline handles '|'.
     {"name": "pipeline", "symbols": ["command_group"], "postprocess": (d) => d[0]},
     {"name": "pipeline", "symbols": ["pipeline", "_", {"literal":"|"}, "_", "command_group"], "postprocess": (d) => ({type: 'pipeline', from: d[0], to: d[4]})},
     
@@ -43,11 +57,11 @@ export default {
     {"name": "arg_list", "symbols": ["word"], "postprocess": (d) => [d[0]]},
     {"name": "arg_list", "symbols": ["arg_list", "__", "word"], "postprocess": (d) => [...d[0], d[2]]},
     
-    // Redirection operators '>>' and '>'. The '>>' rule must come first.
+    // Redirection operators '>>' and '>'.
     {"name": "redirect", "symbols": [{"literal":">"}, {"literal":">"}, "_", "word"], "postprocess": (d) => ({mode: 'append', file: d[3]})},
     {"name": "redirect", "symbols": [{"literal":">"}, "_", "word"], "postprocess": (d) => ({mode: 'overwrite', file: d[2]})},
 
-    // Word definitions (strings, barewords).
+    // Word definitions.
     {"name": "word", "symbols": ["string"], "postprocess": (d) => d[0]},
     {"name": "word", "symbols": ["bareword"], "postprocess": (d) => d[0]},
     {"name": "string", "symbols": [{"literal":"'"}, "sq_chars", {"literal":"'"}], "postprocess": (d) => d[1].join('')},
@@ -61,14 +75,12 @@ export default {
     {"name": "bareword", "symbols": ["bare_chars"], "postprocess": (d) => d[0].join('')},
     {"name": "bare_chars", "symbols": ["bare_char"], "postprocess": (d) => [d[0]]},
     {"name": "bare_chars", "symbols": ["bare_chars", "bare_char"], "postprocess": (d) => [...d[0], d[1]]},
-    // Updated bare_char to forbid the new operators.
     {"name": "bare_char", "symbols": [/[^|&<>;()'"\s`]/], "postprocess": (d) => d[0]},
 
     // Whitespace definitions.
     {"name": "_", "symbols": []},
     {"name": "_", "symbols": ["_", /[\s\t]/], "postprocess": () => null},
-    {"name": "__", "symbols": [/[/\s\t/]/]},
-    {"name": "__", "symbols": ["__", /[\s\t]/], "postprocess": () => null}
+    {"name": "__", "symbols": [/[\s\t]+/]}
 ]
   , ParserStart: "main"
 }

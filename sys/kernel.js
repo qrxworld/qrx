@@ -3,13 +3,14 @@
 // -----------------------------------------------------------------------------
 import http from 'https://unpkg.com/isomorphic-git/http/web/index.js';
 import parse from './parser.js';
+import AstExecutor from './engine/AstExecutor.js';
+import { resolvePath } from './util/path.js';
 
 export default class Kernel {
     constructor(options = {}) {
         const defaults = {
             container: document.getElementById('terminal'),
             welcomeMessage: 'Welcome to the QRx Kernel.\r\n',
-            // All paths are absolute from the server root.
             repo: {
                 commands: '/sys/cmd/index.js',
                 inputHandler: '/sys/handlers/input.js',
@@ -34,8 +35,11 @@ export default class Kernel {
             allowTransparency: true,
         });
 
+        this.executor = new AstExecutor(this);
+
         this.write = this.write.bind(this);
         this.writeln = this.writeln.bind(this);
+        this.resolvePath = (path) => resolvePath(path, this.cwd);
         
         this.term.open(this.config.container);
         this.term.focus();
@@ -46,6 +50,7 @@ export default class Kernel {
         this.lastExitStatus = 0;
         this.commands = {}; this.inputHandler = null;
         this.currentProcess = null;
+        this.jobId = 1;
 
         this.init().catch(err => {
             console.error("Initialization failed:", err);
@@ -84,18 +89,12 @@ export default class Kernel {
         }
     }
 
-    /**
-     * FINAL BUGFIX: This version assumes the manifest provides the correct, full absolute paths.
-     * It performs no path manipulation.
-     */
     async loadKeyHandlers() {
         if (!this.inputHandler) return;
         try {
             const manifestPath = this.config.repo.keyHandlers;
             const { default: keyManifest } = await import(manifestPath);
-
             for (const keyName in keyManifest) {
-                // Assume the manifest provides the correct and full absolute path.
                 const handlerPath = keyManifest[keyName];
                 const handlerModule = await import(handlerPath);
                 this.inputHandler.register(keyName, handlerModule.default);
@@ -108,7 +107,6 @@ export default class Kernel {
 
     async loadCommandManifest() {
         try {
-            // This imports '/sys/cmd/index.js', which then correctly handles its own relative paths.
             const { default: commandRegistry } = await import(this.config.repo.commands);
             this.commands = commandRegistry;
         } catch (error) {
@@ -136,13 +134,27 @@ export default class Kernel {
         }
     }
 
+    /**
+     * Main command execution loop.
+     * FINAL FIX: This version correctly suppresses output for background jobs.
+     */
     async runCommand(line) {
         this.commandInProgress = true;
         const ast = parse(line);
         try {
             for (const node of ast) {
-                const { stdout, status } = await this.executeNode(node);
-                if (stdout && !node.redirection) { this.write(stdout); }
+                if (node.background) {
+                    this.executor.executeNode(node);
+                    this.writeln(`[${this.jobId++}]`);
+                } else {
+                    const result = await this.executor.executeNode(node);
+                    // The executor itself now handles writing output to the terminal,
+                    // so we only need to check for the final stdout from a redirected
+                    // background command and print it if necessary.
+                    if (result && result.stdout) {
+                         this.write(result.stdout);
+                    }
+                }
             }
         } catch (error) {
             this.writeln(`\x1B[1;31mError: ${error.message}\x1B[0m`);
@@ -151,142 +163,6 @@ export default class Kernel {
             this.commandInProgress = false;
             this.prompt();
         }
-    }
-
-    /**
-     * Main AST interpreter, now with logical operator support.
-     */
-    async executeNode(node, stdin = null) {
-        if (!node) return { stdout: '', status: 0 };
-        let result = { stdout: '', status: 0 };
-
-        switch (node.type) {
-            case 'error':
-                result = { stdout: `-qrx: parse error: ${node.message}\n`, status: 2 };
-                break;
-            
-            // NEW: Handle logical AND
-            case 'logical_and': {
-                const leftResult = await this.executeNode(node.left, stdin);
-                // Only execute the right side if the left side succeeded (status 0).
-                if (leftResult.status === 0) {
-                    const rightResult = await this.executeNode(node.right, stdin);
-                    result = {
-                        stdout: leftResult.stdout + rightResult.stdout,
-                        status: rightResult.status
-                    };
-                } else {
-                    result = leftResult; // If left fails, the whole chain fails.
-                }
-                break;
-            }
-
-            // NEW: Handle logical OR
-            case 'logical_or': {
-                const leftResult = await this.executeNode(node.left, stdin);
-                // Only execute the right side if the left side failed (status != 0).
-                if (leftResult.status !== 0) {
-                    const rightResult = await this.executeNode(node.right, stdin);
-                     result = {
-                        stdout: leftResult.stdout + rightResult.stdout,
-                        status: rightResult.status
-                    };
-                } else {
-                    result = leftResult; // If left succeeds, the whole chain succeeds.
-                }
-                break;
-            }
-
-            case 'pipeline': {
-                const leftResult = await this.executeNode(node.from, stdin);
-                // The status of a pipeline is the status of the rightmost command.
-                result = await this.executeNode(node.to, leftResult.stdout);
-                break;
-            }
-
-            case 'group': {
-                const groupOutputBuffer = [];
-                let groupStatus = 0;
-                for (const cmdNode of node.commands) {
-                    const subResult = await this.executeNode(cmdNode, stdin);
-                    groupOutputBuffer.push(subResult.stdout);
-                    groupStatus = subResult.status;
-                }
-                result = { stdout: groupOutputBuffer.join(''), status: groupStatus };
-                break;
-            }
-
-            case 'command': {
-                const buffer = [];
-                const originalWrite = this.write;
-                const originalWriteln = this.writeln;
-                this.write = (data) => buffer.push(data);
-                this.writeln = (data) => buffer.push(data + '\n');
-                let commandStatus = 0;
-                try {
-                    commandStatus = await this.executeSingleCommand(node, stdin);
-                } finally {
-                    this.write = originalWrite;
-                    this.writeln = originalWriteln;
-                }
-                result = { stdout: buffer.join(''), status: commandStatus };
-                break;
-            }
-        }
-
-        if (node.redirection) {
-            const { mode, file } = node.redirection;
-            const path = this.resolvePath(file);
-            try {
-                if (mode === 'append') {
-                    const existing = await this.pfs.readFile(path, 'utf8').catch(() => '');
-                    await this.pfs.writeFile(path, existing + result.stdout);
-                } else {
-                    await this.pfs.writeFile(path, result.stdout);
-                }
-                result.stdout = '';
-            } catch (e) {
-                this.writeln(`-qrx: ${file}: ${e.message}`);
-                result.status = 1;
-            }
-        }
-
-        this.lastExitStatus = result.status;
-        return result;
-    }
-
-    async executeSingleCommand({ name, args }, stdin = null) {
-        const expandedArgs = args.map(arg => {
-            if (arg === '$?') { return String(this.lastExitStatus); }
-            return arg;
-        });
-        if (!name) {
-            if (stdin !== null) this.write(stdin);
-            return 0;
-        }
-        const assignMatch = name.match(/^([a-zA-Z_][a-zA-Z0-9_]*)=(.+)/s);
-        if (assignMatch && expandedArgs.length === 0) {
-            this.env[assignMatch[1]] = assignMatch[2].replace(/^['"]|['"]$/g, '');
-            return 0;
-        }
-        const builtin = this.commands[name];
-        if (builtin?.run) {
-            let status = 0;
-            try {
-                this.currentProcess = builtin.run(this, expandedArgs, stdin);
-                const commandResult = await this.currentProcess;
-                if (typeof commandResult === 'number') {
-                    status = commandResult;
-                }
-            } catch (err) {
-                this.writeln(`-qrx: ${name}: ${err.message}`);
-                status = 1;
-            } finally {
-                this.currentProcess = null;
-            }
-            return status;
-        }
-        return this.handleBuiltins(name, expandedArgs);
     }
     
     handleBuiltins(name, args) {
@@ -304,24 +180,6 @@ export default class Kernel {
                 this.writeln(`command not found: ${name}`);
                 return 127;
         }
-    }
-
-    resolvePath(path) {
-        if (!path) return this.cwd;
-        const fullPath = path.startsWith('/') ? path : `${this.cwd}/${path}`;
-        const parts = fullPath.split('/');
-        const resolvedParts = [];
-        for (const part of parts) {
-            if (part === '..') {
-                if (resolvedParts.length > 0) {
-                    resolvedParts.pop();
-                }
-            } else if (part !== '.' && part !== '') {
-                resolvedParts.push(part);
-            }
-        }
-        const finalPath = `/${resolvedParts.join('/')}`;
-        return finalPath;
     }
 }
 
