@@ -136,7 +136,7 @@ export default class Kernel {
 
     /**
      * Main command execution loop.
-     * FINAL FIX: This version correctly suppresses output for background jobs.
+     * MODIFIED: Fixed background job ID output by printing the ID *before* calling the executor.
      */
     async runCommand(line) {
         this.commandInProgress = true;
@@ -144,13 +144,12 @@ export default class Kernel {
         try {
             for (const node of ast) {
                 if (node.background) {
-                    this.executor.executeNode(node);
+                    // Print the job ID *before* executing, as the executor will
+                    // suppress the kernel's writeln function for background jobs.
                     this.writeln(`[${this.jobId++}]`);
+                    this.executor.executeNode(node); // Not awaited, runs in background
                 } else {
                     const result = await this.executor.executeNode(node);
-                    // The executor itself now handles writing output to the terminal,
-                    // so we only need to check for the final stdout from a redirected
-                    // background command and print it if necessary.
                     if (result && result.stdout) {
                          this.write(result.stdout);
                     }
@@ -182,4 +181,3 @@ export default class Kernel {
         }
     }
 }
-
