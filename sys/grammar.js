@@ -4,7 +4,9 @@
  * This file defines the grammar for the QRx shell language using nearley.js syntax.
  * It specifies how to parse command sequences, pipelines, groups, and arguments.
  * The output of this grammar is an Abstract Syntax Tree (AST).
- * FINAL FIX 5: Reverted to a stable grammar structure and correctly added background operator support.
+ * MODIFIED: Corrected the grammar to resolve ambiguity between the '&' background
+ * operator and the '&&' logical AND operator. This fixes issues where '&&' was
+ * treated as a background command.
  * MODIFIED: Added grammar rules for 'if' statements.
  * MODIFIED: Reordered logical_sequence to prioritize 'if_statement' to resolve parsing ambiguity.
  * MODIFIED: Introduced 'IDENTIFIER' rule to distinguish command names from reserved keywords.
@@ -14,23 +16,16 @@ export default {
     ParserRules: [
     {"name": "main", "symbols": ["_", "command_list", "_"], "postprocess": (d) => d[1]},
 
-    // A command_list is one or more logical_sequences, separated by '&' or ';'.
-    {"name": "command_list", "symbols": ["logical_sequence"], "postprocess": (d) => [d[0]]},
-    {"name": "command_list", "symbols": ["command_list", "_", {"literal":";"}, "_", "logical_sequence"], "postprocess": (d) => [...d[0], d[4]]},
-    {"name": "command_list", "symbols": ["command_list", "_", {"literal":"&"}, "_", "logical_sequence"], "postprocess":
-        (d) => {
-            const last = d[0].pop();
-            return [...d[0], { ...last, background: true }, d[4]];
-        }
-    },
-    // Allows a final '&' or ';' at the end of the line.
-    {"name": "command_list", "symbols": ["command_list", "_", {"literal":"&"}], "postprocess":
-        (d) => {
-            const last = d[0].pop();
-            return [...d[0], { ...last, background: true }];
-        }
-    },
-    {"name": "command_list", "symbols": ["command_list", "_", {"literal":";"}], "postprocess": (d) => d[0]},
+    // MODIFIED: Replaced the old 'command_list' rules to remove ambiguity.
+    // A command list is now a series of command units separated by semicolons.
+    {"name": "command_list", "symbols": ["command_unit"], "postprocess": (d) => [d[0]]},
+    {"name": "command_list", "symbols": ["command_list", "_", {"literal":";"}, "_", "command_unit"], "postprocess": (d) => [...d[0], d[4]]},
+    {"name": "command_list", "symbols": ["command_list", "_", {"literal":";"}], "postprocess": (d) => d[0]}, // Allows a trailing semicolon.
+
+    // NEW: A 'command_unit' is a logical sequence that can be terminated by '&' to run in the background.
+    // This isolates the '&' operator from '&&', fixing the parsing conflict.
+    {"name": "command_unit", "symbols": ["logical_sequence"], "postprocess": (d) => d[0]},
+    {"name": "command_unit", "symbols": ["logical_sequence", "_", {"literal":"&"}], "postprocess": (d) => ({ ...d[0], background: true })},
 
 
     // A logical_sequence handles '&&' and '||', and now 'if' statements.
@@ -145,5 +140,3 @@ export default {
 ]
  , ParserStart: "main"
 }
-
-
